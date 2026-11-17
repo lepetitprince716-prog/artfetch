@@ -247,11 +247,12 @@ impl HttpEngine {
         let part_path = dest.with_file_name(part_name);
         let mut last_err = String::new();
 
+        let safe_url = Self::redact_url(url);
         for attempt in 0..3u64 {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(500 * (1 << attempt))).await;
             }
-            let mut req = self.client.get(url).header("User-Agent", "Mozilla/5.0");
+            let mut req = self.client.get(url);
             if let Some(r) = referer.filter(|s| !s.is_empty()) {
                 req = req.header("Referer", r);
             }
@@ -259,7 +260,7 @@ impl HttpEngine {
                 Ok(resp) => {
                     let status = resp.status();
                     if !status.is_success() {
-                        last_err = format!("HTTP {} downloading {}", status.as_u16(), url);
+                        last_err = format!("HTTP {} downloading {}", status.as_u16(), safe_url);
                         if !Self::should_retry(status) {
                             return Err(last_err);
                         }

@@ -272,10 +272,15 @@ async fn run_multi_probe(
 }
 
 fn download_referer(source: &str, source_url: Option<&str>) -> Option<String> {
-    if source == "pixiv" {
-        Some("https://www.pixiv.net/".to_string())
-    } else {
-        source_url.map(str::to_string)
+    match source {
+        "pixiv" => Some("https://www.pixiv.net/".to_string()),
+        "danbooru" => Some("https://danbooru.donmai.us/".to_string()),
+        "gelbooru" => Some("https://gelbooru.com/".to_string()),
+        "yandere" => Some("https://yande.re/".to_string()),
+        "konachan" => Some("https://konachan.com/".to_string()),
+        "e621" => Some("https://e621.net/".to_string()),
+        "twitter" | "bluesky" | "mastodon" => None,
+        _ => source_url.map(str::to_string),
     }
 }
 
