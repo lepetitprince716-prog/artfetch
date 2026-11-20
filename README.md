@@ -42,12 +42,12 @@ GELBOORU_USER_ID=your_user_id
 artfetch status
 
 # 2. Resolve an artist alias or handle into canonical tags and platform targets
-artfetch resolve "dishwasher1910"
+artfetch resolve "example_artist"
 
 # 3. Probe finished high-resolution works across multiple channels (read-only)
 artfetch probe \
   --source danbooru,gelbooru,yandere \
-  --target "dishwasher1910" \
+  --target "example_artist" \
   --training-ready \
   --since 2026-01-01 \
   --limit 40
@@ -55,7 +55,7 @@ artfetch probe \
 # 4. Plan or execute bounded concurrent downloads (--run writes files)
 artfetch fetch \
   --source danbooru,yandere \
-  --target "dishwasher1910" \
+  --target "example_artist" \
   --rating-tier ecchi \
   --training-ready \
   --exclude-censored \
@@ -68,10 +68,18 @@ artfetch stage \
   --in-dir ./harvest_raw \
   --out-dir ./dataset_1536 \
   --allow-mature \
-  --prefix dish26 \
-  --trigger "@dishwasher1910" \
+  --prefix exa26 \
+  --trigger "@example_artist" \
   --run
 ```
+
+## Changes
+
+- `stage --prefix` and the file names `fetch` builds from source ids must be a single plain file name (no `/`, `\`, `..`, `:` or control characters, not empty). Anything else is refused with an error instead of being written outside the output directory. Download file extensions taken from URLs are kept only when they are 1-5 ASCII letters or digits; otherwise `.jpg` is used.
+- HTTP responses are capped by their decoded size: 32 MiB for API and page responses, and 256 MiB per downloaded file (`fetch --max-download-mib` changes the latter). A larger response is refused and its partial file removed. At most 5 redirects are followed; a redirect from https to http, or from a public host to `localhost` or a loopback, private, link-local or carrier-grade NAT address, is refused.
+- Error messages never carry credentials from request URLs: user info and the values of credential-like query keys (`api_key`, `user_id`, `token`, `key`, `access_token` and similar) are replaced with `REDACTED`.
+- `stage` no longer follows directory links inside `--in-dir`, and reads a linked image only when the link resolves inside the same `--in-dir`. Link cycles no longer make the scan loop, and links cannot pull in files from elsewhere on disk.
+- `--since` accepts only a `YYYY-MM-DD` date. A `twitter` target must be a handle of 1-30 letters, digits or `_` (a leading `@` is dropped), and an `ehentai` target given as a URL must be on `e-hentai.org` or `exhentai.org`. Other values are refused before any external command runs, so they can no longer reach the `twitter` CLI or `gallery-dl` as options or foreign URLs.
 
 ## License
 

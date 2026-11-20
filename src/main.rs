@@ -1,8 +1,9 @@
 use artfetch::filter::{
     FilterOptions, annotate_and_filter, dedupe_cross_platform_items, dedupe_parent_items,
 };
-use artfetch::http::HttpEngine;
+use artfetch::http::{HttpEngine, HttpLimits};
 use artfetch::model::{ALL_SOURCES, ArtistProfile, CandidateItem, RatingPolicy};
+use artfetch::safe_path::FileName;
 use artfetch::sources::{check_all_status, probe_single_source, resolve_artist, resolve_bin};
 use artfetch::stage::{StageConfig, execute_stage, merge_manifest_atomic};
 use clap::{Args, Parser, Subcommand};
@@ -22,6 +23,27 @@ use tokio::sync::Semaphore;
 struct Cli {
     #[command(subcommand)]
     cmd: Commands,
+}
+
+/// `--since` is compared as text against `YYYY-MM-DD` dates and handed to
+/// source queries and external CLIs, so only that exact form is accepted.
+fn parse_since(raw: &str) -> Result<String, String> {
+    let b = raw.as_bytes();
+    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    let shaped = b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && digits(0..4)
+        && digits(5..7)
+        && digits(8..10);
+    let in_range = shaped
+        && (1..=12).contains(&raw[5..7].parse::<u8>().unwrap_or(0))
+        && (1..=31).contains(&raw[8..10].parse::<u8>().unwrap_or(0));
+    if in_range {
+        Ok(raw.to_string())
+    } else {
+        Err("expected a date as YYYY-MM-DD".to_string())
+    }
 }
 
 #[derive(Args, Clone)]
@@ -69,7 +91,7 @@ enum Commands {
         target: String,
         #[arg(long)]
         profile: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, value_parser = parse_since, help = "Only items created on or after this date (YYYY-MM-DD)")]
         since: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -91,7 +113,7 @@ enum Commands {
         target: String,
         #[arg(long)]
         profile: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, value_parser = parse_since, help = "Only items created on or after this date (YYYY-MM-DD)")]
         since: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -103,6 +125,13 @@ enum Commands {
         concurrency: usize,
         #[arg(long, default_value_t = 2)]
         per_host: usize,
+        #[arg(
+            long,
+            default_value_t = 256,
+            value_parser = clap::value_parser!(u64).range(1..=1 << 20),
+            help = "Refuse any single download larger than this many MiB once decoded"
+        )]
+        max_download_mib: u64,
         #[arg(long)]
         run: bool,
         #[command(flatten)]
@@ -284,6 +313,17 @@ fn download_referer(source: &str, source_url: Option<&str>) -> Option<String> {
     }
 }
 
+/// `.ext` from the URL path when it is 1-5 ASCII letters or digits, else `.jpg`.
+fn image_extension(url: &str) -> String {
+    url.split(['?', '#'])
+        .next()
+        .and_then(|p| Path::new(p).extension())
+        .and_then(|s| s.to_str())
+        .filter(|e| (1..=5).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .map(|e| format!(".{}", e.to_ascii_lowercase()))
+        .unwrap_or_else(|| ".jpg".to_string())
+}
+
 async fn fetch_ehentai_isolated(
     items: &[CandidateItem],
     out_dir: &Path,
@@ -455,10 +495,15 @@ async fn real_main() -> Result<(), String> {
             out,
             concurrency,
             per_host,
+            max_download_mib,
             run,
             filters,
         } => {
-            let engine = HttpEngine::new(per_host, 45)?;
+            let limits = HttpLimits {
+                max_download_bytes: max_download_mib << 20,
+                ..HttpLimits::default()
+            };
+            let engine = HttpEngine::with_limits(per_host, 45, limits)?;
             let (items, channel_errors, policy) = run_multi_probe(
                 &engine,
                 &source,
@@ -531,15 +576,10 @@ async fn real_main() -> Result<(), String> {
                 async move {
                     let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                     let url = it.image_url.clone().unwrap();
-                    let ext = url
-                        .split('?')
-                        .next()
-                        .and_then(|p| Path::new(p).extension())
-                        .and_then(|s| s.to_str())
-                        .map(|e| format!(".{}", e.to_ascii_lowercase()))
-                        .unwrap_or_else(|| ".jpg".to_string());
-                    let fname = format!("{}_{}{ext}", it.source, it.id);
-                    let dest = out_dir.join(&fname);
+                    let fname = format!("{}_{}{}", it.source, it.id, image_extension(&url));
+                    let dest = FileName::parse(&fname)
+                        .and_then(|n| n.path_in(&out_dir))
+                        .map_err(|e| format!("refusing {} item {:?}: {e}", it.source, it.id))?;
                     let referer = download_referer(&it.source, it.source_url.as_deref());
                     let sha256 = eng.download_atomic(&url, referer.as_deref(), &dest).await?;
                     let mut rec = serde_json::to_value(&it).unwrap();

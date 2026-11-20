@@ -13,6 +13,8 @@ use url::Url;
 
 static EH_GALLERY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"e-hentai\.org/g/(\d+)/([0-9a-f]+)").expect("valid regex"));
+static TWITTER_HANDLE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_]{1,30}$").expect("valid regex"));
 static GELBOORU_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"page=post&(?:amp;)?s=view&(?:amp;)?id=(\d+)").expect("regex"));
 static GELBOORU_IMG_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -90,6 +92,12 @@ pub fn iso_from_epoch(epoch_secs: i64) -> Option<String> {
 
 fn url_encode(input: &str) -> String {
     url::form_urlencoded::byte_serialize(input.as_bytes()).collect()
+}
+
+/// The `YYYY-MM-DD` head of a timestamp. `None` when the text is shorter than
+/// ten bytes or its tenth byte falls inside a multi-byte character.
+fn date_prefix(stamp: &str) -> Option<&str> {
+    stamp.get(..10)
 }
 
 fn booru_rating_qualifier(style: &str, tier: RatingTier) -> &'static str {
@@ -204,9 +212,11 @@ pub async fn check_all_status(engine: &HttpEngine) -> BTreeMap<String, Value> {
     };
     out.insert("gelbooru".to_string(), gb_status);
 
+    // Synthetic placeholder gallery id: verifies gdata endpoint reachability (returns a
+    // `gmetadata` JSON key) without embedding a real gallery entry in public source code.
     let eh_payload = json!({
         "method": "gdata",
-        "gidlist": [[2750950, "c78fb3c40d"]],
+        "gidlist": [[1, "0000000000"]],
         "namespace": 1
     });
     let eh_status = match engine
@@ -490,9 +500,8 @@ pub async fn probe_dapi(
                         .map(str::to_string)
                 });
             if let (Some(s), Some(c)) = (since, iso_created.as_deref())
-                && c.len() >= 10
                 && c.starts_with("20")
-                && &c[..10] < s
+                && date_prefix(c).is_some_and(|d| d < s)
             {
                 reached_cutoff = true;
                 continue;
@@ -676,8 +685,7 @@ pub async fn probe_moebooru(
                 .and_then(Value::as_i64)
                 .and_then(iso_from_epoch);
             if let (Some(s), Some(c)) = (since, iso_created.as_deref())
-                && c.len() >= 10
-                && &c[..10] < s
+                && date_prefix(c).is_some_and(|d| d < s)
             {
                 reached_cutoff = true;
                 continue;
@@ -909,8 +917,7 @@ pub async fn probe_bluesky(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             if let Some(s) = since
-                && cdate.len() >= 10
-                && &cdate[..10] < s
+                && date_prefix(cdate).is_some_and(|d| d < s)
             {
                 reached_cutoff = true;
                 continue;
@@ -1051,8 +1058,7 @@ pub async fn probe_mastodon(
         for st in &rows {
             let cdate = st.get("created_at").and_then(Value::as_str).unwrap_or("");
             if let Some(s) = since
-                && cdate.len() >= 10
-                && &cdate[..10] < s
+                && date_prefix(cdate).is_some_and(|d| d < s)
             {
                 reached_cutoff = true;
                 continue;
@@ -1123,6 +1129,11 @@ pub async fn probe_twitter(
 ) -> Result<Vec<CandidateItem>, String> {
     let tw_bin = resolve_bin("twitter").ok_or_else(|| "twitter CLI not found".to_string())?;
     let clean = handle.trim_start_matches('@');
+    if !TWITTER_HANDLE_RE.is_match(clean) {
+        return Err(format!(
+            "twitter target must be a handle of 1-30 letters, digits or '_', got {handle:?}"
+        ));
+    }
     let mut cmd = Command::new(tw_bin);
     cmd.args([
         "search",
@@ -1229,8 +1240,7 @@ pub async fn probe_pixiv(
             .and_then(Value::as_str)
             .unwrap_or("");
         if let Some(s) = since
-            && cdate.len() >= 10
-            && &cdate[..10] < s
+            && date_prefix(cdate).is_some_and(|d| d < s)
         {
             continue;
         }
@@ -1338,8 +1348,7 @@ pub async fn probe_artstation(
             .and_then(Value::as_str)
             .unwrap_or("");
         if let Some(s) = since
-            && cdate.len() >= 10
-            && &cdate[..10] < s
+            && date_prefix(cdate).is_some_and(|d| d < s)
         {
             continue;
         }
@@ -1481,6 +1490,19 @@ async fn enrich_ehentai_gids(
     Ok(out)
 }
 
+/// Only e-hentai.org, exhentai.org and their subdomains are handed to
+/// gallery-dl, which may hold cookies for them.
+fn is_ehentai_url(raw: &str) -> bool {
+    let Ok(u) = url::Url::parse(raw) else {
+        return false;
+    };
+    let host = u.host_str().unwrap_or("").to_ascii_lowercase();
+    matches!(u.scheme(), "http" | "https")
+        && ["e-hentai.org", "exhentai.org"]
+            .iter()
+            .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+}
+
 pub async fn probe_ehentai(
     engine: &HttpEngine,
     target: &str,
@@ -1492,6 +1514,12 @@ pub async fn probe_ehentai(
     }
     let gdl = resolve_bin("gallery-dl").ok_or_else(|| "gallery-dl not found".to_string())?;
     let search_url = if target.starts_with("http://") || target.starts_with("https://") {
+        if !is_ehentai_url(target) {
+            return Err(format!(
+                "ehentai target URL must be on e-hentai.org or exhentai.org, got {}",
+                HttpEngine::redact_url(target)
+            ));
+        }
         target.to_string()
     } else if target.contains(':') {
         format!("https://e-hentai.org/tag/{}", url_encode(target))
@@ -1610,8 +1638,9 @@ pub async fn resolve_artist(
 
     if canonical_tag.is_none() && !clean_q.is_empty() && !clean_q.starts_with("http") {
         let mut patterns = vec![format!("*{clean_q}*")];
-        if clean_q.len() >= 6 {
-            patterns.push(format!("*{}*", &clean_q[1..]));
+        let mut rest = clean_q.chars();
+        if rest.next().is_some() && rest.clone().count() >= 5 {
+            patterns.push(format!("*{}*", rest.as_str()));
         }
         for pat in patterns {
             let tg_url = format!(
@@ -1853,5 +1882,18 @@ pub async fn probe_single_source(
             probe_ehentai(engine, target, limit).await
         }
         other => Err(format!("unsupported source '{other}'")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::date_prefix;
+
+    #[test]
+    fn date_prefix_never_splits_a_character() {
+        assert_eq!(date_prefix("2026-01-02T03:04:05Z"), Some("2026-01-02"));
+        assert_eq!(date_prefix("2026-01-02"), Some("2026-01-02"));
+        assert_eq!(date_prefix("2026-01"), None);
+        assert_eq!(date_prefix("2026\u{5e74}01\u{6708}01\u{65e5}"), None);
     }
 }

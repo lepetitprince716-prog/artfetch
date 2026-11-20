@@ -1,0 +1,166 @@
+name: Privacy scan
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A pull request is judged by its head commit, so a newer push replaces the older run.
+  # Every push event gets its own group so no pushed commit is skipped.
+  group: privacy-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Scans run in dedicated jobs apart from the Rust build and tests (ci.yml).
+  # On pull requests, the scanner, public rules, wrapper, template, and ignore files are loaded
+  # from the exact trusted base branch commit (resolved via `git show-ref --verify`, never by a
+  # short name a pushed tag could shadow), and Python runs in isolated mode (-I -B). The PR's own
+  # commits are scanned once more with inline allow comments off.
+  # A base commit that does not carry the guard files fails the job with a stated reason: the
+  # guard reaches the base branch by a push (scanned with the pushed commit's own files), never
+  # through a pull request that would judge itself.
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan tracked files and history (trusted base scanner on PRs)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -eu
+          scanner=tools/privacy_scan.py
+          rules=tools/privacy_rules.json
+          if [ -n "$BASE_REF" ]; then
+            base=$(git --no-replace-objects show-ref --verify --hash "refs/remotes/origin/$BASE_REF" 2>/dev/null) &&
+              base=$(git --no-replace-objects rev-parse --verify --quiet --end-of-options "$base^{commit}") || {
+              echo "privacy_scan: error: refs/remotes/origin/$BASE_REF is not present in this clone" >&2
+              exit 2
+            }
+            echo "privacy_scan: using trusted base commit $base (refs/remotes/origin/$BASE_REF)" >&2
+            for f in tools/privacy_scan.py tools/privacy_rules.json; do
+              git --no-replace-objects cat-file -e "$base:$f" 2>/dev/null || {
+                echo "::error::The base branch $BASE_REF ($base) has no $f, so there is no trusted scanner to judge this pull request. Add the guard to $BASE_REF by a push first (see PRIVACY.md)."
+                exit 2
+              }
+            done
+            git --no-replace-objects show "$base:tools/privacy_scan.py" > "$RUNNER_TEMP/privacy_scan.py"
+            git --no-replace-objects show "$base:tools/privacy_rules.json" > "$RUNNER_TEMP/privacy_rules.json"
+            scanner="$RUNNER_TEMP/privacy_scan.py"
+            rules="$RUNNER_TEMP/privacy_rules.json"
+          fi
+          python3 -I -B "$scanner" --rules "$rules" --no-private --tracked --history
+
+  betterleaks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # Linux x64 asset of the v1.10.1 release. The digest matches the release's checksums.txt.
+      BETTERLEAKS_VERSION: "1.10.1"
+      BETTERLEAKS_ARCHIVE: betterleaks_1.10.1_linux_x64.tar.gz
+      BETTERLEAKS_SHA256: c174b42d7aa60caf58c0c3e555c0e4bed01fe6b0d99a412bce777b5af4ce913e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Betterleaks (pinned version, checked against the hash above)
+        run: |
+          set -eu
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RUNNER_TEMP/$BETTERLEAKS_ARCHIVE" \
+            "https://github.com/betterleaks/betterleaks/releases/download/v${BETTERLEAKS_VERSION}/${BETTERLEAKS_ARCHIVE}"
+          echo "${BETTERLEAKS_SHA256}  ${RUNNER_TEMP}/${BETTERLEAKS_ARCHIVE}" | sha256sum --check --strict -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$BETTERLEAKS_ARCHIVE" -C "$RUNNER_TEMP/bin" betterleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Show the installed version
+        run: betterleaks version
+      - name: Scan history for secrets (trusted base wrapper and ignore file on PRs)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -eu
+          wrapper=tools/secret_scan.sh
+          redact_scanner=tools/privacy_scan.py
+          rules=tools/privacy_rules.json
+          ignore_path=""
+          if [ -n "$BASE_REF" ]; then
+            base=$(git --no-replace-objects show-ref --verify --hash "refs/remotes/origin/$BASE_REF" 2>/dev/null) &&
+              base=$(git --no-replace-objects rev-parse --verify --quiet --end-of-options "$base^{commit}") || {
+              echo "secret_scan: error: refs/remotes/origin/$BASE_REF is not present in this clone" >&2
+              exit 2
+            }
+            echo "secret_scan: using trusted base commit $base (refs/remotes/origin/$BASE_REF)" >&2
+            for f in tools/secret_scan.sh tools/secret_scan.tmpl tools/privacy_scan.py tools/privacy_rules.json; do
+              git --no-replace-objects cat-file -e "$base:$f" 2>/dev/null || {
+                echo "::error::The base branch $BASE_REF ($base) has no $f, so there is no trusted wrapper to judge this pull request. Add the guard to $BASE_REF by a push first (see PRIVACY.md)."
+                exit 2
+              }
+            done
+            mkdir -p "$RUNNER_TEMP/trusted-tools"
+            git --no-replace-objects show "$base:tools/secret_scan.sh" > "$RUNNER_TEMP/trusted-tools/secret_scan.sh"
+            git --no-replace-objects show "$base:tools/secret_scan.tmpl" > "$RUNNER_TEMP/trusted-tools/secret_scan.tmpl"
+            git --no-replace-objects show "$base:tools/privacy_scan.py" > "$RUNNER_TEMP/trusted-tools/privacy_scan.py"
+            git --no-replace-objects show "$base:tools/privacy_rules.json" > "$RUNNER_TEMP/trusted-tools/privacy_rules.json"
+            chmod +x "$RUNNER_TEMP/trusted-tools/secret_scan.sh"
+            wrapper="$RUNNER_TEMP/trusted-tools/secret_scan.sh"
+            redact_scanner="$RUNNER_TEMP/trusted-tools/privacy_scan.py"
+            rules="$RUNNER_TEMP/trusted-tools/privacy_rules.json"
+
+            # Pin Betterleaks ignore input from the trusted base only so a PR cannot silently
+            # bypass detection by adding .betterleaksignore or legacy .gitleaksignore entries.
+            if git --no-replace-objects cat-file -e "$base:.betterleaksignore" 2>/dev/null; then
+              git --no-replace-objects show "$base:.betterleaksignore" > "$RUNNER_TEMP/trusted-tools/.betterleaksignore"
+              ignore_path="$RUNNER_TEMP/trusted-tools/.betterleaksignore"
+            elif git --no-replace-objects cat-file -e "$base:.gitleaksignore" 2>/dev/null; then
+              git --no-replace-objects show "$base:.gitleaksignore" > "$RUNNER_TEMP/trusted-tools/.gitleaksignore"
+              ignore_path="$RUNNER_TEMP/trusted-tools/.gitleaksignore"
+            else
+              : > "$RUNNER_TEMP/trusted-tools/empty.ignore"
+              ignore_path="$RUNNER_TEMP/trusted-tools/empty.ignore"
+            fi
+
+            # Surface control-plane changes and newly added inline allow annotations for review.
+            touched=$(git --no-replace-objects diff --name-only "$base" HEAD -- \
+              .github/workflows .githooks tools/privacy_scan.py tools/privacy_rules.json \
+              tools/secret_scan.sh tools/secret_scan.tmpl \
+              .betterleaksignore .gitleaksignore .gitignore || true)
+            if [ -n "$touched" ]; then
+              echo "::notice::PR modifies guard/workflow/ignore control-plane files (review independently): $(echo "$touched" | tr '\n' ' ')"
+            fi
+            # Betterleaks honours an inline allow wherever the substring appears on the line
+            # (`# _gitleaks:allow`, `nobetterleaks:allow` and `gitleaks:allowed` included), so count
+            # by substring, not by word.
+            inline_added=$(git --no-replace-objects diff --unified=0 "$base" HEAD |
+              grep -Ec '^\+.*(betterleaks|gitleaks):allow' || true)
+            if [ "$inline_added" -gt 0 ]; then
+              echo "::notice::PR adds $inline_added line(s) with an inline betterleaks:allow/gitleaks:allow comment; the scan of the PR's own commits does not honour them."
+            fi
+          fi
+          SECRET_SCAN_IGNORE_PATH="$ignore_path" \
+            SECRET_SCAN_REDACT_SCANNER="$redact_scanner" \
+            SECRET_SCAN_RULES="$rules" \
+            SECRET_SCAN_NO_PRIVATE=1 \
+            sh "$wrapper" history
+          if [ -n "$BASE_REF" ]; then
+            # The PR's own commits are scanned again with inline allow comments off: a PR cannot
+            # exempt its own finding. Exemptions reviewed into the base (its ignore file, or inline
+            # comments already merged) still apply to the history scan above.
+            SECRET_SCAN_IGNORE_PATH="$ignore_path" \
+              SECRET_SCAN_IGNORE_ALLOW=1 \
+              SECRET_SCAN_REDACT_SCANNER="$redact_scanner" \
+              SECRET_SCAN_RULES="$rules" \
+              SECRET_SCAN_NO_PRIVATE=1 \
+              sh "$wrapper" range "$base..HEAD" || {
+              echo "::error::The PR's own commits hold a secret-scan finding with inline allow comments off. $inline_added added line(s) carry an inline allow comment, which this scan does not honour. An exemption goes into the base branch's .betterleaksignore after review."
+              exit 1
+            }
+          fi
