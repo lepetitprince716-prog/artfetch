@@ -1,7 +1,7 @@
 use artfetch::filter::{
     FilterOptions, annotate_and_filter, dedupe_cross_platform_items, dedupe_parent_items,
 };
-use artfetch::http::HttpEngine;
+use artfetch::http::{HttpEngine, HttpLimits};
 use artfetch::model::{ALL_SOURCES, ArtistProfile, CandidateItem, RatingPolicy};
 use artfetch::safe_path::FileName;
 use artfetch::sources::{check_all_status, probe_single_source, resolve_artist, resolve_bin};
@@ -104,6 +104,13 @@ enum Commands {
         concurrency: usize,
         #[arg(long, default_value_t = 2)]
         per_host: usize,
+        #[arg(
+            long,
+            default_value_t = 256,
+            value_parser = clap::value_parser!(u64).range(1..=1 << 20),
+            help = "Refuse any single download larger than this many MiB once decoded"
+        )]
+        max_download_mib: u64,
         #[arg(long)]
         run: bool,
         #[command(flatten)]
@@ -467,10 +474,15 @@ async fn real_main() -> Result<(), String> {
             out,
             concurrency,
             per_host,
+            max_download_mib,
             run,
             filters,
         } => {
-            let engine = HttpEngine::new(per_host, 45)?;
+            let limits = HttpLimits {
+                max_download_bytes: max_download_mib << 20,
+                ..HttpLimits::default()
+            };
+            let engine = HttpEngine::with_limits(per_host, 45, limits)?;
             let (items, channel_errors, policy) = run_multi_probe(
                 &engine,
                 &source,
