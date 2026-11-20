@@ -13,6 +13,8 @@ use url::Url;
 
 static EH_GALLERY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"e-hentai\.org/g/(\d+)/([0-9a-f]+)").expect("valid regex"));
+static TWITTER_HANDLE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[A-Za-z0-9_]{1,30}$").expect("valid regex"));
 static GELBOORU_ID_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"page=post&(?:amp;)?s=view&(?:amp;)?id=(\d+)").expect("regex"));
 static GELBOORU_IMG_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -1127,6 +1129,11 @@ pub async fn probe_twitter(
 ) -> Result<Vec<CandidateItem>, String> {
     let tw_bin = resolve_bin("twitter").ok_or_else(|| "twitter CLI not found".to_string())?;
     let clean = handle.trim_start_matches('@');
+    if !TWITTER_HANDLE_RE.is_match(clean) {
+        return Err(format!(
+            "twitter target must be a handle of 1-30 letters, digits or '_', got {handle:?}"
+        ));
+    }
     let mut cmd = Command::new(tw_bin);
     cmd.args([
         "search",
@@ -1483,6 +1490,19 @@ async fn enrich_ehentai_gids(
     Ok(out)
 }
 
+/// Only e-hentai.org, exhentai.org and their subdomains are handed to
+/// gallery-dl, which may hold cookies for them.
+fn is_ehentai_url(raw: &str) -> bool {
+    let Ok(u) = url::Url::parse(raw) else {
+        return false;
+    };
+    let host = u.host_str().unwrap_or("").to_ascii_lowercase();
+    matches!(u.scheme(), "http" | "https")
+        && ["e-hentai.org", "exhentai.org"]
+            .iter()
+            .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+}
+
 pub async fn probe_ehentai(
     engine: &HttpEngine,
     target: &str,
@@ -1494,6 +1514,12 @@ pub async fn probe_ehentai(
     }
     let gdl = resolve_bin("gallery-dl").ok_or_else(|| "gallery-dl not found".to_string())?;
     let search_url = if target.starts_with("http://") || target.starts_with("https://") {
+        if !is_ehentai_url(target) {
+            return Err(format!(
+                "ehentai target URL must be on e-hentai.org or exhentai.org, got {}",
+                HttpEngine::redact_url(target)
+            ));
+        }
         target.to_string()
     } else if target.contains(':') {
         format!("https://e-hentai.org/tag/{}", url_encode(target))

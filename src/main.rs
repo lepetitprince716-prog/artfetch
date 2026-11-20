@@ -25,6 +25,27 @@ struct Cli {
     cmd: Commands,
 }
 
+/// `--since` is compared as text against `YYYY-MM-DD` dates and handed to
+/// source queries and external CLIs, so only that exact form is accepted.
+fn parse_since(raw: &str) -> Result<String, String> {
+    let b = raw.as_bytes();
+    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    let shaped = b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && digits(0..4)
+        && digits(5..7)
+        && digits(8..10);
+    let in_range = shaped
+        && (1..=12).contains(&raw[5..7].parse::<u8>().unwrap_or(0))
+        && (1..=31).contains(&raw[8..10].parse::<u8>().unwrap_or(0));
+    if in_range {
+        Ok(raw.to_string())
+    } else {
+        Err("expected a date as YYYY-MM-DD".to_string())
+    }
+}
+
 #[derive(Args, Clone)]
 struct SharedFilterFlags {
     #[arg(long, help = "Rating tier: sfw, ecchi, mature_only, or all")]
@@ -70,7 +91,7 @@ enum Commands {
         target: String,
         #[arg(long)]
         profile: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, value_parser = parse_since, help = "Only items created on or after this date (YYYY-MM-DD)")]
         since: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -92,7 +113,7 @@ enum Commands {
         target: String,
         #[arg(long)]
         profile: Option<PathBuf>,
-        #[arg(long)]
+        #[arg(long, value_parser = parse_since, help = "Only items created on or after this date (YYYY-MM-DD)")]
         since: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
