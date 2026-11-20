@@ -73,6 +73,10 @@ artfetch stage \
   --run
 ```
 
+## Changes
+
+- `stage --prefix` and the file names `fetch` builds from source ids must be a single plain file name (no `/`, `\`, `..`, `:` or control characters, not empty). Anything else is refused with an error instead of being written outside the output directory. Download file extensions taken from URLs are kept only when they are 1-5 ASCII letters or digits; otherwise `.jpg` is used.
+
 ## License
 
 Licensed under the Apache License, Version 2.0 ([LICENSE](LICENSE)).

@@ -3,6 +3,7 @@ use artfetch::filter::{
 };
 use artfetch::http::HttpEngine;
 use artfetch::model::{ALL_SOURCES, ArtistProfile, CandidateItem, RatingPolicy};
+use artfetch::safe_path::FileName;
 use artfetch::sources::{check_all_status, probe_single_source, resolve_artist, resolve_bin};
 use artfetch::stage::{StageConfig, execute_stage, merge_manifest_atomic};
 use clap::{Args, Parser, Subcommand};
@@ -284,6 +285,17 @@ fn download_referer(source: &str, source_url: Option<&str>) -> Option<String> {
     }
 }
 
+/// `.ext` from the URL path when it is 1-5 ASCII letters or digits, else `.jpg`.
+fn image_extension(url: &str) -> String {
+    url.split(['?', '#'])
+        .next()
+        .and_then(|p| Path::new(p).extension())
+        .and_then(|s| s.to_str())
+        .filter(|e| (1..=5).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .map(|e| format!(".{}", e.to_ascii_lowercase()))
+        .unwrap_or_else(|| ".jpg".to_string())
+}
+
 async fn fetch_ehentai_isolated(
     items: &[CandidateItem],
     out_dir: &Path,
@@ -531,15 +543,10 @@ async fn real_main() -> Result<(), String> {
                 async move {
                     let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                     let url = it.image_url.clone().unwrap();
-                    let ext = url
-                        .split('?')
-                        .next()
-                        .and_then(|p| Path::new(p).extension())
-                        .and_then(|s| s.to_str())
-                        .map(|e| format!(".{}", e.to_ascii_lowercase()))
-                        .unwrap_or_else(|| ".jpg".to_string());
-                    let fname = format!("{}_{}{ext}", it.source, it.id);
-                    let dest = out_dir.join(&fname);
+                    let fname = format!("{}_{}{}", it.source, it.id, image_extension(&url));
+                    let dest = FileName::parse(&fname)
+                        .and_then(|n| n.path_in(&out_dir))
+                        .map_err(|e| format!("refusing {} item {:?}: {e}", it.source, it.id))?;
                     let referer = download_referer(&it.source, it.source_url.as_deref());
                     let sha256 = eng.download_atomic(&url, referer.as_deref(), &dest).await?;
                     let mut rec = serde_json::to_value(&it).unwrap();

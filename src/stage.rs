@@ -1,4 +1,5 @@
 use crate::model::{RatingPolicy, RatingTier};
+use crate::safe_path::FileName;
 use image::{DynamicImage, GenericImageView, ImageReader, RgbImage, imageops::FilterType};
 use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
 use rayon::prelude::*;
@@ -393,6 +394,7 @@ fn collect_image_files(dir: &Path, out: &mut Vec<PathBuf>, seen: &mut HashSet<Pa
 }
 
 pub fn execute_stage(cfg: &StageConfig) -> Result<Value, String> {
+    let prefix = FileName::parse(&cfg.prefix).map_err(|e| format!("--prefix {e}"))?;
     for d in &cfg.in_dirs {
         if !d.is_dir() {
             return Err(format!("--in-dir is not a directory: {}", d.display()));
@@ -600,9 +602,9 @@ pub fn execute_stage(cfg: &StageConfig) -> Result<Value, String> {
         .enumerate()
         .map(|(i, kp)| {
             let idx = i + 1;
-            let item_id = format!("{}_{idx:03}", cfg.prefix);
+            let item_id = format!("{}_{idx:03}", prefix.as_str());
             let jpg_name = format!("{item_id}.jpg");
-            let dest = cfg.out_dir.join(&jpg_name);
+            let dest = FileName::parse(&jpg_name)?.path_in(&cfg.out_dir)?;
             let info = write_training_jpeg(&kp.path, &dest, cfg.max_edge, cfg.jpeg_quality)?;
             Ok(json!({
                 "num_id": format!("#{idx:02}"),
