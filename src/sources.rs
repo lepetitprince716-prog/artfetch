@@ -204,9 +204,11 @@ pub async fn check_all_status(engine: &HttpEngine) -> BTreeMap<String, Value> {
     };
     out.insert("gelbooru".to_string(), gb_status);
 
+    // Synthetic placeholder gallery id: verifies gdata endpoint reachability (returns a
+    // `gmetadata` JSON key) without embedding a real gallery entry in public source code.
     let eh_payload = json!({
         "method": "gdata",
-        "gidlist": [[2750950, "c78fb3c40d"]],
+        "gidlist": [[1, "0000000000"]],
         "namespace": 1
     });
     let eh_status = match engine
