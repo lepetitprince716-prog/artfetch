@@ -362,33 +362,54 @@ pub struct StageConfig {
     pub run: bool,
 }
 
-fn collect_image_files(dir: &Path, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
+/// Every image file under the input root `root`. Directory links are never
+/// followed, so a link cycle cannot make the walk loop or revisit a tree; a
+/// file link counts only when its target resolves inside `root`.
+fn collect_image_files(root: &Path, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
+    let Ok(root) = root.canonicalize() else {
+        return;
+    };
+    walk_image_files(&root, &root, out, seen);
+}
+
+fn walk_image_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut sorted: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|x| x.path())).collect();
-    sorted.sort();
-    for p in sorted {
+    let mut sorted: Vec<(PathBuf, std::fs::FileType)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_type().ok().map(|t| (e.path(), t)))
+        .collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    for (p, kind) in sorted {
         let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
         if name.starts_with('.') {
             continue;
         }
-        if p.is_dir() {
-            collect_image_files(&p, out, seen);
-        } else if p.is_file() {
-            let ext = p
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "bmp") {
-                let canon = p.canonicalize().unwrap_or_else(|_| p.clone());
-                if seen.insert(canon.clone()) {
-                    out.push(canon);
-                }
-            }
+        if kind.is_dir() {
+            walk_image_files(root, &p, out, seen);
+            continue;
+        }
+        let ext = p
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp" | "bmp") {
+            continue;
+        }
+        let Ok(canon) = p.canonicalize() else {
+            continue;
+        };
+        let is_file = if kind.is_symlink() {
+            canon.starts_with(root) && canon.is_file()
+        } else {
+            kind.is_file()
+        };
+        if is_file && seen.insert(canon.clone()) {
+            out.push(canon);
         }
     }
 }
