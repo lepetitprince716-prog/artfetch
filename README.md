@@ -42,12 +42,12 @@ GELBOORU_USER_ID=your_user_id
 artfetch status
 
 # 2. Resolve an artist alias or handle into canonical tags and platform targets
-artfetch resolve "dishwasher1910"
+artfetch resolve "example_artist"
 
 # 3. Probe finished high-resolution works across multiple channels (read-only)
 artfetch probe \
   --source danbooru,gelbooru,yandere \
-  --target "dishwasher1910" \
+  --target "example_artist" \
   --training-ready \
   --since 2026-01-01 \
   --limit 40
@@ -55,7 +55,7 @@ artfetch probe \
 # 4. Plan or execute bounded concurrent downloads (--run writes files)
 artfetch fetch \
   --source danbooru,yandere \
-  --target "dishwasher1910" \
+  --target "example_artist" \
   --rating-tier ecchi \
   --training-ready \
   --exclude-censored \
@@ -68,8 +68,8 @@ artfetch stage \
   --in-dir ./harvest_raw \
   --out-dir ./dataset_1536 \
   --allow-mature \
-  --prefix dish26 \
-  --trigger "@dishwasher1910" \
+  --prefix exa26 \
+  --trigger "@example_artist" \
   --run
 ```
 
