@@ -92,6 +92,12 @@ fn url_encode(input: &str) -> String {
     url::form_urlencoded::byte_serialize(input.as_bytes()).collect()
 }
 
+/// The `YYYY-MM-DD` head of a timestamp. `None` when the text is shorter than
+/// ten bytes or its tenth byte falls inside a multi-byte character.
+fn date_prefix(stamp: &str) -> Option<&str> {
+    stamp.get(..10)
+}
+
 fn booru_rating_qualifier(style: &str, tier: RatingTier) -> &'static str {
     match (style, tier) {
         ("danbooru", RatingTier::Sfw) => " rating:g,s",
@@ -492,9 +498,8 @@ pub async fn probe_dapi(
                         .map(str::to_string)
                 });
             if let (Some(s), Some(c)) = (since, iso_created.as_deref())
-                && c.len() >= 10
                 && c.starts_with("20")
-                && &c[..10] < s
+                && date_prefix(c).is_some_and(|d| d < s)
             {
                 reached_cutoff = true;
                 continue;
@@ -678,8 +683,7 @@ pub async fn probe_moebooru(
                 .and_then(Value::as_i64)
                 .and_then(iso_from_epoch);
             if let (Some(s), Some(c)) = (since, iso_created.as_deref())
-                && c.len() >= 10
-                && &c[..10] < s
+                && date_prefix(c).is_some_and(|d| d < s)
             {
                 reached_cutoff = true;
                 continue;
@@ -911,8 +915,7 @@ pub async fn probe_bluesky(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             if let Some(s) = since
-                && cdate.len() >= 10
-                && &cdate[..10] < s
+                && date_prefix(cdate).is_some_and(|d| d < s)
             {
                 reached_cutoff = true;
                 continue;
@@ -1053,8 +1056,7 @@ pub async fn probe_mastodon(
         for st in &rows {
             let cdate = st.get("created_at").and_then(Value::as_str).unwrap_or("");
             if let Some(s) = since
-                && cdate.len() >= 10
-                && &cdate[..10] < s
+                && date_prefix(cdate).is_some_and(|d| d < s)
             {
                 reached_cutoff = true;
                 continue;
@@ -1231,8 +1233,7 @@ pub async fn probe_pixiv(
             .and_then(Value::as_str)
             .unwrap_or("");
         if let Some(s) = since
-            && cdate.len() >= 10
-            && &cdate[..10] < s
+            && date_prefix(cdate).is_some_and(|d| d < s)
         {
             continue;
         }
@@ -1340,8 +1341,7 @@ pub async fn probe_artstation(
             .and_then(Value::as_str)
             .unwrap_or("");
         if let Some(s) = since
-            && cdate.len() >= 10
-            && &cdate[..10] < s
+            && date_prefix(cdate).is_some_and(|d| d < s)
         {
             continue;
         }
@@ -1612,8 +1612,9 @@ pub async fn resolve_artist(
 
     if canonical_tag.is_none() && !clean_q.is_empty() && !clean_q.starts_with("http") {
         let mut patterns = vec![format!("*{clean_q}*")];
-        if clean_q.len() >= 6 {
-            patterns.push(format!("*{}*", &clean_q[1..]));
+        let mut rest = clean_q.chars();
+        if rest.next().is_some() && rest.clone().count() >= 5 {
+            patterns.push(format!("*{}*", rest.as_str()));
         }
         for pat in patterns {
             let tg_url = format!(
@@ -1855,5 +1856,18 @@ pub async fn probe_single_source(
             probe_ehentai(engine, target, limit).await
         }
         other => Err(format!("unsupported source '{other}'")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::date_prefix;
+
+    #[test]
+    fn date_prefix_never_splits_a_character() {
+        assert_eq!(date_prefix("2026-01-02T03:04:05Z"), Some("2026-01-02"));
+        assert_eq!(date_prefix("2026-01-02"), Some("2026-01-02"));
+        assert_eq!(date_prefix("2026-01"), None);
+        assert_eq!(date_prefix("2026\u{5e74}01\u{6708}01\u{65e5}"), None);
     }
 }
