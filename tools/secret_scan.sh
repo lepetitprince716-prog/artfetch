@@ -270,9 +270,9 @@ peel() {
 # fails, or output that does not parse, fails the scan.
 scan_binary() {
   python3 -I -B -c '
-import os, subprocess, sys
+import os, subprocess, sys, tempfile
 
-stream, mode, *rest = sys.argv[1:]
+stream, feed_dir, mode, *rest = sys.argv[1:]
 git = ["git", "--no-replace-objects"]
 diff_opts = ["--no-renames", "--no-relative", "--no-textconv", "--no-ext-diff"]
 
@@ -288,8 +288,26 @@ def marked(numstat):
     return path, added == b"-" and deleted == b"-"
 
 def run(args, data=None):
+    # Input goes through an unlinked file, never a pipe: writing a pipe while git fills
+    # its output pipe deadlocks once the kernel shrinks pipes to PIPE_BUF and poll still
+    # reports a full pipe writable (macOS under pipe-memory pressure).
+    if data is None:
+        try:
+            return subprocess.run(git + args, check=True, stdout=subprocess.PIPE).stdout
+        except subprocess.CalledProcessError as error:
+            fail(f"git {args[0]} exited {error.returncode}")
+    feed = None
     try:
-        return subprocess.run(git + args, check=True, input=data, stdout=subprocess.PIPE).stdout
+        feed = tempfile.TemporaryFile(dir=feed_dir)
+        feed.write(data)
+        feed.seek(0)
+    except OSError as error:
+        if feed is not None:
+            feed.close()
+        fail(f"cannot stage the input for git {args[0]} ({error.strerror})")
+    try:
+        with feed:
+            return subprocess.run(git + args, check=True, stdin=feed, stdout=subprocess.PIPE).stdout
     except subprocess.CalledProcessError as error:
         fail(f"git {args[0]} exited {error.returncode}")
 
@@ -383,7 +401,7 @@ with open(stream, "wb") as out:
     out.write(b"\n")
     for data in found:
         out.write(data + b"\n")
-' "$work/binary-stream" "$@" || return 1
+' "$work/binary-stream" "$work" "$@" || return 1
   if [ "$(wc -c <"$work/binary-stream")" -gt 1 ]; then
     # No exemption applies here: an empty ignore list, read from an empty directory so no
     # ignore file beside it counts either, and inline allow comments off.
